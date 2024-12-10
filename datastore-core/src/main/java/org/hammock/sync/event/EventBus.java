@@ -1,0 +1,178 @@
+/*
+ * Copyright © 2016 IBM Corp. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file
+ * except in compliance with the License. You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under the
+ * License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language governing permissions
+ * and limitations under the License.
+ */
+
+package org.hammock.sync.event;
+
+import org.hammock.sync.event.notifications.Notification;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * <p>
+ * A publish/subscribe event bus for sync notifications.
+ * </p>
+ * <p>
+ * This class provides methods for registering and un-registering event subscribers as well as a
+ * method for posting an event to the bus. Events are isolated to each specific instance of this
+ * class.
+ * </p>
+ */
+public class EventBus {
+
+    private static final Logger LOGGER = Logger.getLogger(EventBus.class.getName());
+
+    // A map of listeners to their subscribed methods.
+    private final Map<Object, List<SubscriberMethod>> listeners = new ConcurrentHashMap
+            <Object, List<SubscriberMethod>>();
+
+    /**
+     * Post an event to the bus. All subscribers to the event class type posted will be notified.
+     *
+     * @param event to post to subscribers
+     */
+    public void post(Notification event) {
+        for (Map.Entry<Object, List<SubscriberMethod>> entry : listeners.entrySet()) {
+            for (SubscriberMethod method : entry.getValue()) {
+                if (method.eventTypeToInvokeOn.isInstance(event)) {
+                    try {
+                        method.methodToInvokeOnEvent.invoke(entry.getKey(), event);
+                    } catch (InvocationTargetException e) {
+                        // We log this exception and swallow it because we need to ensure we don't
+                        // prevent completion of notifications if one listener is badly behaved and
+                        // throws an exception of some kind.
+                        LOGGER.log(Level.SEVERE, "Subscriber invocation failed for method \""
+                                + method.toString() + "\"", e);
+                    } catch (IllegalAccessException e) {
+                        throw new RuntimeException(EventBus.class.getName() + " could not access " +
+                                "subscriber " + method.toString(), e);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Register an instance containing one or more subscriber methods to receive events.
+     * <p>
+     * To receive events the instance must have 1 or more methods annotated with
+     * {@link Subscribe}.
+     * </p>
+     *
+     * <p>
+     *     The following restrictions are placed on the subscriber instance.
+     * </p>
+     * <ul>
+     *    <li>The class of the subscriber <strong>must</strong> be public</li>
+     *    <li>Methods annotated with <code>@Subscribe</code> <strong>must</strong> be public</li>
+     *    <li>Methods annotated with <code>@Subscribe</code> <strong>must</strong> have exactly <strong>one</strong> parameter</li>
+     * </ul>
+     *
+     * @param object the instance that will be notified when an event is posted
+     * @throws IllegalArgumentException if the subscribing class does not adhere to the restrictions listed.
+     *
+     */
+    public void register(Object object) {
+    validateSubscriberClass(object);
+    List<SubscriberMethod> methods = new ArrayList<SubscriberMethod>();
+    collectSubscriberMethods(object.getClass(), methods);
+    listeners.put(object, methods);
+}
+
+private void validateSubscriberClass(Object object) {
+    Class<?> listenerClass = object.getClass();
+    if(!Modifier.isPublic(listenerClass.getModifiers())){
+        throw new IllegalArgumentException(String.format(Locale.ENGLISH,
+            "Event Subscriber class %s needs to be public",
+            listenerClass.getName()));
+    }
+}
+
+private void collectSubscriberMethods(Class<?> listenerClass, List<SubscriberMethod> methods) {
+    do {
+        for (Method m : listenerClass.getDeclaredMethods()) {
+            if (m.isAnnotationPresent(Subscribe.class)) {
+                validateAndAddSubscriberMethod(listenerClass, m, methods);
+            }
+        }
+    } while ((listenerClass = listenerClass.getSuperclass()) != null);
+}
+
+private void validateAndAddSubscriberMethod(Class<?> listenerClass, Method m, List<SubscriberMethod> methods) {
+    validateMethodModifier(listenerClass, m);
+    validateMethodParameters(listenerClass, m, methods);
+}
+
+private void validateMethodModifier(Class<?> listenerClass, Method m) {
+    if (!Modifier.isPublic(m.getModifiers())){
+        throw new IllegalArgumentException(String.format(Locale.ENGLISH,
+            "Subscriber method %s#%s is required to be public",
+            listenerClass.getName(), m.getName()));
+    }
+}
+
+private void validateMethodParameters(Class<?> listenerClass, Method m, List<SubscriberMethod> methods) {
+    Class[] params = m.getParameterTypes();
+    if (params.length != 1) {
+        throw new IllegalArgumentException(String.format(Locale.ENGLISH,
+            "Subscriber method  %s#%s is required to have only 1 parameter",
+            listenerClass.getName(), m.getName()));
+    }
+    
+    if(!Notification.class.isAssignableFrom(params[0])){
+        throw new IllegalArgumentException(String.format(Locale.ENGLISH,
+            "Subscriber method %s#%s parameter is required to be assignable %s",
+            listenerClass.getName(), m.getName(), Notification.class.getCanonicalName()));
+    }
+    methods.add(new SubscriberMethod(m, params[0]));
+}
+
+//Refactoring end
+
+    /**
+     * Deregister a previously registered instance with subscriber methods.
+     *
+     * @param object the instance that will no longer be notified of events
+     */
+    public void unregister(Object object) {
+        listeners.remove(object);
+    }
+
+    /**
+     * Class that encapsulates a {@link Subscribe} annotated method and the
+     * type of event it is subscribed to (as discovered from its single parameter type).
+     */
+    private static final class SubscriberMethod {
+        private final Method methodToInvokeOnEvent;
+        private final Class<?> eventTypeToInvokeOn;
+
+        private SubscriberMethod(Method methodToInvokeOnEvent, Class<?> eventTypeToInvokeOn) {
+            this.methodToInvokeOnEvent = methodToInvokeOnEvent;
+            this.eventTypeToInvokeOn = eventTypeToInvokeOn;
+        }
+
+        @Override
+        public String toString() {
+            return methodToInvokeOnEvent.toString();
+        }
+    }
+}
