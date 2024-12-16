@@ -248,124 +248,152 @@ public class HttpConnection {
      * @throws IOException if there was a problem writing data to the server
      */
     public HttpConnection execute() throws IOException {
-        boolean retry = true;
-
-        while (retry && numberOfRetries-- > 0) {
-            connection = connectionFactory.openConnection(url);
-
-            if (url.getUserInfo() != null) {
-                // Insert at position 0 in case another interceptor wants to overwrite the BasicAuth
-                requestInterceptors.add(0, new BasicAuthInterceptor(url.getUserInfo()));
+        initContext();
+    
+        while (shouldRetry() && numberOfRetries-- > 0) {
+            setupConnection();
+            setupBasicAuth();
+            configureConnection();
+            processRequestInterceptors();
+            setRequestProperties();
+            logRequest();
+            processRequestBody();
+            logResponse();
+            processResponseInterceptors();
+            
+            if (shouldRetryRequest()) {
+                handleRetry();
             }
-            // always read the result, so we can retrieve the HTTP response code
-            connection.setDoInput(true);
-            connection.setRequestMethod(requestMethod);
-            if (contentType != null) {
-                connection.setRequestProperty("Content-type", contentType);
-            }
-
-            // We set up the output config before the interceptors to allow the configuration to be
-            // modified. For example an interceptor might change the chunk size by calling
-            // context.connection.getConnection().setChunkedStreamingMode(16384);
-            if (input != null) {
-                connection.setDoOutput(true);
-                if (inputLength != -1) {
-                    // TODO Remove this cast to int when the minimum supported level is 1.7.
-                    // On 1.7 upwards this method takes a long, otherwise int.
-                    connection.setFixedLengthStreamingMode((int) this.inputLength);
-                } else {
-                    connection.setChunkedStreamingMode(0); // Use 0 for the default size
-
-                    // Note that CouchDB does not currently work for a chunked multipart stream, see
-                    // https://issues.apache.org/jira/browse/COUCHDB-1403. Cases that use
-                    // multipart need to provide the content length until that is fixed.
-                }
-            }
-
-            currentContext = (currentContext == null) ? new HttpConnectionInterceptorContext
-                    (this) : new HttpConnectionInterceptorContext(this, currentContext
-                    .interceptorStates);
-
-            for (HttpConnectionRequestInterceptor requestInterceptor : requestInterceptors) {
-                try {
-                    currentContext = requestInterceptor.interceptRequest(currentContext);
-                } catch (HttpConnectionInterceptorException e) {
-                    throw convertAndThrowInterceptorException(e);
-                }
-            }
-
-            //set request properties after interceptors, in case the interceptors have added
-            // to the properties map
-            for (Map.Entry<String, String> property : requestProperties.entrySet()) {
-                connection.setRequestProperty(property.getKey(), property.getValue());
-            }
-
-            // Log the request
-            if (requestIsLoggable && logger.isLoggable(Level.FINE)) {
-                logger.fine(String.format("%s request%s", getLogRequestIdentifier(), (connection
-                        .usingProxy() ? " via proxy" : "")));
-            }
-
-            // Log the request headers
-            if (requestIsLoggable && logger.isLoggable(Level.FINER)) {
-                logger.finer(String.format("%s request headers %s", getLogRequestIdentifier(),
-                        connection.getRequestProperties()));
-            }
-
-            if (input != null) {
-                InputStream is = input.getInputStream();
-                OutputStream os = connection.getOutputStream();
-                try {
-                    // The buffer size used for writing to this output stream has an impact on the
-                    //  HTTP chunk size, so we make it a pretty large size to avoid limiting the
-                    // size
-                    // of those chunks (although this appears in turn to set the chunk sizes).
-                    IOUtils.copyLarge(is, os, new byte[16 * 1024]);
-                    os.flush();
-                } finally {
-                    Utils.close(is);
-                    Utils.close(os);
-                }
-            }
-
-            // Log the response
-            if (requestIsLoggable && logger.isLoggable(Level.FINE)) {
-                logger.fine(String.format("%s response %s %s", getLogRequestIdentifier(),
-                        connection.getResponseCode(), connection.getResponseMessage()));
-            }
-
-            // Log the response headers
-            if (requestIsLoggable && logger.isLoggable(Level.FINER)) {
-                logger.finer(String.format("%s response headers %s", getLogRequestIdentifier(),
-                        connection.getHeaderFields()));
-            }
-
-            for (HttpConnectionResponseInterceptor responseInterceptor : responseInterceptors) {
-                try {
-                    currentContext = responseInterceptor.interceptResponse(currentContext);
-                } catch (HttpConnectionInterceptorException e) {
-                    throw convertAndThrowInterceptorException(e);
-                }
-            }
-
-            // retry flag is set from the final step in the response interceptRequest pipeline
-            retry = currentContext.replayRequest;
-
-            // If we're going to retry we should consume any existing error streams to avoid
-            // leaking connections. Consuming the stream is preferable to just closing it as it
-            // makes the connection eligible for re-use.
-            if (retry && numberOfRetries > 0) {
-                Utils.consumeAndCloseStream(connection.getErrorStream());
-            }
-
+            
             if (numberOfRetries == 0) {
                 logger.info("Maximum number of retries reached");
             }
         }
-        // return ourselves to allow method chaining
         return this;
     }
-
+    
+    private void initContext() {
+        currentContext = (currentContext == null) ? 
+            new HttpConnectionInterceptorContext(this) : 
+            new HttpConnectionInterceptorContext(this, currentContext.interceptorStates);
+    }
+    
+    private boolean shouldRetry() {
+        return retry && numberOfRetries > 0;
+    }
+    
+    private void setupConnection() throws IOException {
+        connection = connectionFactory.openConnection(url);
+        connection.setDoInput(true);
+    }
+    
+    private void setupBasicAuth() {
+        if (url.getUserInfo() != null) {
+            requestInterceptors.add(0, new BasicAuthInterceptor(url.getUserInfo()));
+        }
+    }
+    
+    private void configureConnection() throws IOException {
+        connection.setRequestMethod(requestMethod);
+        if (contentType != null) {
+            connection.setRequestProperty("Content-type", contentType);
+        }
+        configureOutputSettings();
+    }
+    
+    private void configureOutputSettings() {
+        if (input != null) {
+            connection.setDoOutput(true);
+            if (inputLength != -1) {
+                connection.setFixedLengthStreamingMode((int) inputLength);
+            } else {
+                connection.setChunkedStreamingMode(0);
+            }
+        }
+    }
+    
+    private void processRequestInterceptors() throws IOException {
+        for (HttpConnectionRequestInterceptor interceptor : requestInterceptors) {
+            try {
+                currentContext = interceptor.interceptRequest(currentContext);
+            } catch (HttpConnectionInterceptorException e) {
+                throw convertAndThrowInterceptorException(e);
+            }
+        }
+    }
+    
+    private void setRequestProperties() {
+        for (Map.Entry<String, String> property : requestProperties.entrySet()) {
+            connection.setRequestProperty(property.getKey(), property.getValue());
+        }
+    }
+    
+    private void logRequest() {
+        if (requestIsLoggable && logger.isLoggable(Level.FINE)) {
+            logger.fine(String.format("%s request%s", getLogRequestIdentifier(), 
+                (connection.usingProxy() ? " via proxy" : "")));
+            if (logger.isLoggable(Level.FINER)) {
+                logger.finer(String.format("%s request headers %s", getLogRequestIdentifier(),
+                    connection.getRequestProperties()));
+            }
+        }
+    }
+    
+    private void processRequestBody() throws IOException {
+        if (input != null) {
+            writeRequestBody();
+        }
+    }
+    
+    private void writeRequestBody() throws IOException {
+        InputStream is = input.getInputStream();
+        OutputStream os = connection.getOutputStream();
+        try {
+            IOUtils.copyLarge(is, os, new byte[16 * 1024]);
+            os.flush();
+        } finally {
+            Utils.close(is);
+            Utils.close(os);
+        }
+    }
+    
+    private void logResponse() {
+        if (requestIsLoggable && logger.isLoggable(Level.FINE)) {
+            logResponseDetails();
+        }
+    }
+    
+    private void logResponseDetails() {
+        try {
+            logger.fine(String.format("%s response %s %s", getLogRequestIdentifier(),
+                connection.getResponseCode(), connection.getResponseMessage()));
+            if (logger.isLoggable(Level.FINER)) {
+                logger.finer(String.format("%s response headers %s", getLogRequestIdentifier(),
+                    connection.getHeaderFields()));
+            }
+        } catch (IOException e) {
+            logger.warning("Failed to log response details");
+        }
+    }
+    
+    private void processResponseInterceptors() throws IOException {
+        for (HttpConnectionResponseInterceptor interceptor : responseInterceptors) {
+            try {
+                currentContext = interceptor.interceptResponse(currentContext);
+            } catch (HttpConnectionInterceptorException e) {
+                throw convertAndThrowInterceptorException(e);
+            }
+        }
+    }
+    
+    private boolean shouldRetryRequest() {
+        return currentContext.replayRequest && numberOfRetries > 0;
+    }
+    
+    private void handleRetry() {
+        Utils.consumeAndCloseStream(connection.getErrorStream());
+    }
+    
     private HttpConnectionInterceptorException convertAndThrowInterceptorException(HttpConnectionInterceptorException e) throws IOException {
         // Sadly the current interceptor API doesn't allow an IOException to be thrown
         // so to avoid swallowing them the interceptors need to wrap them in the runtime
