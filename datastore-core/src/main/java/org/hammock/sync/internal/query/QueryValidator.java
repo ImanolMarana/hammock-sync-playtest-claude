@@ -264,84 +264,81 @@ class QueryValidator {
     @SuppressWarnings("unchecked")
     private static List<Object> compressMultipleNotOperators(List<Object> clause) {
         List<Object> accumulator = new ArrayList<Object>();
-
+    
         for (Object fieldClause: clause) {
-            Object predicate;
-            String fieldName;
-            if (fieldClause instanceof Map && !((Map) fieldClause).isEmpty()) {
-                Map<String, Object> fieldClauseMap = (Map<String, Object>) fieldClause;
-                fieldName = (String) fieldClauseMap.keySet().toArray()[0];
-                predicate = fieldClauseMap.get(fieldName);
+            Map<String, Object> element = processFieldClause(fieldClause);
+            if (element != null) {
+                accumulator.add(element);
             } else {
-                // if this isn't a map, we don't know what to do so add the clause
-                // to the accumulator to be dealt with later as part of the final selector
-                // validation.
                 accumulator.add(fieldClause);
-                continue;
             }
-
-            if (fieldName.startsWith("$") && predicate instanceof List) {
-                predicate = compressMultipleNotOperators((List<Object>) predicate);
-            } else {
-                String operator;
-                Object operatorPredicate;
-                if (predicate instanceof Map && !((Map) predicate).isEmpty()) {
-                    Map<String, Object> predicateMap = (Map<String, Object>) predicate;
-                    operator = (String) predicateMap.keySet().toArray()[0];
-                    operatorPredicate = predicateMap.get(operator);
-                } else {
-                    // if this isn't a map, we don't know what to do so add the clause
-                    // to the accumulator to be dealt with later as part of the final selector
-                    // validation.
-                    accumulator.add(fieldClause);
-                    continue;
-                }
-                if (operator.equals(NOT)) {
-                    // If a $not operator is encountered we need to check for
-                    // a series of nested $not operators.
-                    boolean notOpFound = true;
-                    boolean negateOperator = false;
-                    Object originalOperatorPredicate = operatorPredicate;
-                    while (notOpFound) {
-                        // if a series of nested $not operators are found then they need to
-                        // be compressed down to one $not operator or in the case of an
-                        // even set of $not operators, down to zero $not operators.
-                        if (operatorPredicate instanceof Map) {
-                            Map<String, Object> notClauseMap;
-                            notClauseMap = (Map<String, Object>) operatorPredicate;
-                            String nextOperator = (String) notClauseMap.keySet().toArray()[0];
-                            if (nextOperator.equals(NOT)) {
-                                // Each time we find a $not operator we flip the negateOperator's
-                                // boolean value.
-                                negateOperator = !negateOperator;
-                                operatorPredicate = notClauseMap.get(nextOperator);
-                            } else {
-                                notOpFound = false;
-                            }
-                        } else {
-                            // unexpected condition - revert back to original
-                            operatorPredicate = originalOperatorPredicate;
-                            negateOperator = false;
-                            notOpFound = false;
-                        }
-                    }
-                    if (negateOperator) {
-                        Map<String, Object> operatorPredicateMap;
-                        operatorPredicateMap = (Map<String, Object>) operatorPredicate;
-                        operator = (String) operatorPredicateMap.keySet().toArray()[0];
-                        operatorPredicate = operatorPredicateMap.get(operator);
-                    }
-                    ((Map<String, Object>) predicate).clear();
-                    ((Map<String, Object>) predicate).put(operator, operatorPredicate);
-                }
-            }
-
-            Map<String, Object> element = new HashMap<String, Object>();
-            element.put(fieldName, predicate);
-            accumulator.add(element);
         }
-
+        
         return accumulator;
+    }
+    
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> processFieldClause(Object fieldClause) {
+        if (!(fieldClause instanceof Map) || ((Map) fieldClause).isEmpty()) {
+            return null;
+        }
+        
+        Map<String, Object> fieldClauseMap = (Map<String, Object>) fieldClause;
+        String fieldName = (String) fieldClauseMap.keySet().toArray()[0];
+        Object predicate = fieldClauseMap.get(fieldName);
+        
+        if (fieldName.startsWith("$") && predicate instanceof List) {
+            predicate = compressMultipleNotOperators((List<Object>) predicate);
+        } else {
+            predicate = processNotOperator(predicate);
+        }
+        
+        Map<String, Object> element = new HashMap<String, Object>();
+        element.put(fieldName, predicate);
+        return element;
+    }
+    
+    @SuppressWarnings("unchecked")
+    private static Object processNotOperator(Object predicate) {
+        if (!(predicate instanceof Map) || ((Map) predicate).isEmpty()) {
+            return predicate;
+        }
+        
+        Map<String, Object> predicateMap = (Map<String, Object>) predicate;
+        String operator = (String) predicateMap.keySet().toArray()[0];
+        if (!operator.equals(NOT)) {
+            return predicate;
+        }
+        
+        Object operatorPredicate = predicateMap.get(operator);
+        boolean negateOperator = compressNotChain(operatorPredicate);
+        
+        if (negateOperator && operatorPredicate instanceof Map) {
+            Map<String, Object> operatorPredicateMap = (Map<String, Object>) operatorPredicate;
+            operator = (String) operatorPredicateMap.keySet().toArray()[0];
+            operatorPredicate = operatorPredicateMap.get(operator);
+            predicateMap.clear();
+            predicateMap.put(operator, operatorPredicate);
+        }
+        
+        return predicate;
+    }
+    
+    @SuppressWarnings("unchecked")
+    private static boolean compressNotChain(Object operatorPredicate) {
+        boolean negateOperator = false;
+        
+        while (operatorPredicate instanceof Map) {
+            Map<String, Object> notClauseMap = (Map<String, Object>) operatorPredicate;
+            String nextOperator = (String) notClauseMap.keySet().toArray()[0];
+            if (!nextOperator.equals(NOT)) {
+                break;
+            }
+            negateOperator = !negateOperator;
+            operatorPredicate = notClauseMap.get(nextOperator);
+        }
+        
+        return negateOperator;
     }
 
     @SuppressWarnings("unchecked")
