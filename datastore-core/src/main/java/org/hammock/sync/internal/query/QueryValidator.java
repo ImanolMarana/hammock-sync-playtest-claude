@@ -487,53 +487,57 @@ private static List<Object> convertToIntegerList(List<Object> rawArguments) {
 
     @SuppressWarnings("unchecked")
     private static void validateClause(Map<String, Object> clause) throws QueryException {
-        List<String> validOperators = Arrays.asList(EQ,
-                                                    LT,
-                                                    GT,
-                                                    EXISTS,
-                                                    NOT,
-                                                    GTE,
-                                                    LTE,
-                                                    IN,
-                                                    MOD,
-                                                    SIZE);
-        if (clause.size() == 1) {
-            String operator = (String) clause.keySet().toArray()[0];
-            if (validOperators.contains(operator)) {
-                // contains correct operator
-                Object clauseOperand = clause.get(operator);
-                // Handle special cases:
-                //  - $not is the only operator that expects a Map
-                //  - $in is the only operator that expects a List
-                if (operator.equals(NOT)) {
-                    if (!(clauseOperand instanceof Map)) {
-                        throw new QueryException(String.format(Locale.ENGLISH,
-                                "clauseOperand %s is not an instance of Map",
-                                clauseOperand));
-                    }
-                    validateClause((Map) clauseOperand);
-                } else if (operator.equals(IN)) {
-                    if (!(clauseOperand instanceof List)) {
-                        throw new QueryException(String.format(Locale.ENGLISH,
-                                "clauseOperand %s is not an instance of List",
-                                clauseOperand));
-                    }
-                    validateInListValues((List<Object>) clauseOperand);
-                } else {
-                    validatePredicateValue(clauseOperand, operator);
-                }
-            } else {
-                throw new QueryException(String.format(Locale.ENGLISH,
-                        "operator %s is not a valid operator",
-                        operator));
-            }
-        } else {
-            throw new QueryException(String.format(Locale.ENGLISH,
-                    "Clause %s must only have one key",
-                    clause));
-        }
-
+        List<String> validOperators = Arrays.asList(EQ, LT, GT, EXISTS, NOT, GTE, LTE, IN, MOD, SIZE);
+    
+        validateClauseSize(clause);
+    
+        String operator = (String) clause.keySet().toArray()[0];
+        validateOperatorType(operator, validOperators);
+    
+        Object clauseOperand = clause.get(operator);
+        validateOperatorOperand(operator, clauseOperand);
     }
+    
+    private static void validateClauseSize(Map<String, Object> clause) throws QueryException {
+        if (clause.size() != 1) {
+            throw new QueryException(String.format(Locale.ENGLISH,
+                "Clause %s must only have one key", clause));
+        }
+    }
+    
+    private static void validateOperatorType(String operator, List<String> validOperators) throws QueryException {
+        if (!validOperators.contains(operator)) {
+            throw new QueryException(String.format(Locale.ENGLISH,
+                "operator %s is not a valid operator", operator));
+        }
+    }
+    
+    private static void validateOperatorOperand(String operator, Object clauseOperand) throws QueryException {
+        if (operator.equals(NOT)) {
+            validateNotOperand(clauseOperand);
+        } else if (operator.equals(IN)) {
+            validateInOperand(clauseOperand);
+        } else {
+            validatePredicateValue(clauseOperand, operator);
+        }
+    }
+    
+    private static void validateNotOperand(Object clauseOperand) throws QueryException {
+        if (!(clauseOperand instanceof Map)) {
+            throw new QueryException(String.format(Locale.ENGLISH,
+                "clauseOperand %s is not an instance of Map", clauseOperand));
+        }
+        validateClause((Map)clauseOperand);
+    }
+    
+    private static void validateInOperand(Object clauseOperand) throws QueryException {
+        if (!(clauseOperand instanceof List)) {
+            throw new QueryException(String.format(Locale.ENGLISH,
+                "clauseOperand %s is not an instance of List", clauseOperand));
+        }
+        validateInListValues((List<Object>)clauseOperand);
+    }
+
 
     /**
      * This method handles the special case where a text search clause is encountered.
