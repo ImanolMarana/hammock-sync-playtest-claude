@@ -114,24 +114,36 @@ public class UnindexedMatcher {
         // the query will be reduced to a single entry:
         // { "$and": [ ... predicates (possibly compound) ... ] }
         // { "$or": [ ... predicates (possibly compound) ... ] }
-
-        ChildrenQueryNode root = null;
-        List<Object> clauses = new ArrayList<Object>();
-
+    
+        ChildrenQueryNode root = initializeRoot(selector);
+        List<Object> clauses = root != null ? getClauses(selector) : new ArrayList<Object>();
+    
+        handleBasicClauses(root, clauses);
+        handleCompoundClauses(root, clauses);
+    
+        return root;
+    }
+    
+    private static ChildrenQueryNode initializeRoot(Map<String, Object> selector) {
         if (selector.get(QueryConstants.AND) != null) {
-            clauses = (List<Object>) selector.get(QueryConstants.AND);
-            root = new AndQueryNode();
+            return new AndQueryNode();
         } else if (selector.get(QueryConstants.OR) != null) {
-            clauses = (List<Object>) selector.get(QueryConstants.OR);
-            root = new OrQueryNode();
+            return new OrQueryNode();
         }
-
-        //
-        // First handle the simple "field": { "$operator": "value" } clauses.
-        //
-
+        return null;
+    }
+    
+    @SuppressWarnings("unchecked")
+    private static List<Object> getClauses(Map<String, Object> selector) {
+        if (selector.get(QueryConstants.AND) != null) {
+            return (List<Object>) selector.get(QueryConstants.AND);
+        }
+        return (List<Object>) selector.get(QueryConstants.OR);
+    }
+    
+    @SuppressWarnings("unchecked")
+    private static void handleBasicClauses(ChildrenQueryNode root, List<Object> clauses) {
         List<Object> basicClauses = new ArrayList<Object>();
-
         for (Object rawClause: clauses) {
             Map<String, Object> clause = (Map<String, Object>) rawClause;
             String field = (String) clause.keySet().toArray()[0];
@@ -139,46 +151,41 @@ public class UnindexedMatcher {
                 basicClauses.add(rawClause);
             }
         }
-
-        // Execution step will evaluate each child node and AND or OR the results.
+    
         for (Object expression: basicClauses) {
             OperatorExpressionNode node = new OperatorExpressionNode((Map<String, Object>) expression);
             if (root != null) {
                 root.children.add(node);
             }
         }
-
-        //
-        // AND and OR subclauses are handled identically whatever the parent is.
-        // We go through the query twice to order the OR clauses before the AND
-        // clauses, for predictability.
-        //
-
-        // Add subclauses that are OR
+    }
+    
+    @SuppressWarnings("unchecked")
+    private static void handleCompoundClauses(ChildrenQueryNode root, List<Object> clauses) {
+        // Handle OR clauses
         for (Object rawClause: clauses) {
             Map<String, Object> clause = (Map<String, Object>) rawClause;
             String field = (String) clause.keySet().toArray()[0];
             if (field.equals(QueryConstants.OR)) {
-                QueryNode orNode = buildExecutionTreeForSelector(clause);
-                if (root != null) {
-                    root.children.add(orNode);
-                }
+                addCompoundClause(root, clause);
             }
         }
-
-        // Add subclauses that are AND
+    
+        // Handle AND clauses
         for (Object rawClause: clauses) {
             Map<String, Object> clause = (Map<String, Object>) rawClause;
             String field = (String) clause.keySet().toArray()[0];
             if (field.equals(QueryConstants.AND)) {
-                QueryNode andNode = buildExecutionTreeForSelector(clause);
-                if (root != null) {
-                    root.children.add(andNode);
-                }
+                addCompoundClause(root, clause);
             }
         }
-
-        return root;
+    }
+    
+    private static void addCompoundClause(ChildrenQueryNode root, Map<String, Object> clause) {
+        QueryNode node = buildExecutionTreeForSelector(clause);
+        if (root != null) {
+            root.children.add(node);
+        }
     }
 
     /**
