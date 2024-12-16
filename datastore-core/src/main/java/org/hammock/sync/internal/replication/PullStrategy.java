@@ -224,90 +224,113 @@ public class PullStrategy implements ReplicationStrategy {
             DocumentException, DocumentStoreException {
         logger.info("Pull replication started");
         long startTime = System.currentTimeMillis();
-
-        // We were cancelled before we started
-        if (this.state.cancel) {
+    
+        if (shouldNotContinueReplication()) {
             return;
         }
-
-        if (!this.sourceDb.exists()) {
-            throw new DatabaseNotFoundException(
-                    "Database not found " + this.sourceDb.getIdentifier());
-        }
-
+    
         this.state.documentCounter = 0;
-
+    
         while (!this.state.cancel) {
             this.state.batchCounter++;
-            final Object lastKnownCheckpoint = this.targetDb.getCheckpoint(this.getReplicationId());
-            String msg = String.format(
-                    "Batch %s started (completed %s changes so far)",
-                    this.state.batchCounter,
-                    this.state.documentCounter
-            );
-            logger.info(msg);
-            long batchStartTime = System.currentTimeMillis();
-
-            ChangesResultWrapper changeFeeds = this.nextBatch(lastKnownCheckpoint);
-            int batchChangesProcessed = 0;
-
-            // So we can check whether all changes were processed during
-            // a log analysis.
-            msg = String.format(
-                    "Batch %s contains %s changes",
-                    this.state.batchCounter,
-                    changeFeeds.size()
-            );
-            logger.info(msg);
-
-            if (changeFeeds.size() > 0) {
-                batchChangesProcessed = processOneChangesBatch(changeFeeds);
-                state.documentCounter += batchChangesProcessed;
-            }
-
-            if (!this.state.cancel && (lastKnownCheckpoint == null || !lastKnownCheckpoint.equals(changeFeeds.getLastSeq()))) {
-                try {
-                    this.targetDb.putCheckpoint(this.getReplicationId(), changeFeeds.getLastSeq());
-                } catch (DocumentStoreException e) {
-                    logger.log(Level.WARNING, "Failed to put checkpoint doc, next replication " +
-                            "will " +
-                            "start from previous checkpoint", e);
-                }
-            }
-
-            long batchEndTime = System.currentTimeMillis();
-            msg = String.format(
-                    "Batch %s completed in %sms (batch was %s changes)",
-                    this.state.batchCounter,
-                    batchEndTime - batchStartTime,
-                    batchChangesProcessed
-            );
-            logger.info(msg);
-
-            // This logic depends on the changes in the feed rather than the
-            // changes we actually processed.
+            processBatch();
+    
+            // If changes in feed are less than limit, we're done
+            ChangesResultWrapper changeFeeds = getLastChangeFeeds();
             if (changeFeeds.size() < this.changeLimitPerBatch) {
                 break;
             }
         }
-
+    
+        logReplicationComplete(startTime);
+    }
+    
+    private boolean shouldNotContinueReplication() throws DatabaseNotFoundException {
+        if (this.state.cancel) {
+            return true;
+        }
+    
+        if (!this.sourceDb.exists()) {
+            throw new DatabaseNotFoundException(
+                "Database not found " + this.sourceDb.getIdentifier());
+        }
+        return false;
+    }
+    
+    private void processBatch() throws DatabaseNotFoundException, ExecutionException, InterruptedException,
+        DocumentException, DocumentStoreException {
+        final Object lastKnownCheckpoint = this.targetDb.getCheckpoint(this.getReplicationId());
+        logBatchStarted();
+    
+        ChangesResultWrapper changeFeeds = this.nextBatch(lastKnownCheckpoint);
+        int batchChangesProcessed = 0;
+        logBatchChanges(changeFeeds);
+    
+        if (changeFeeds.size() > 0) {
+            batchChangesProcessed = processOneChangesBatch(changeFeeds);
+            state.documentCounter += batchChangesProcessed;
+        }
+    
+        updateCheckpoint(lastKnownCheckpoint, changeFeeds);
+        logBatchCompleted(batchChangesProcessed);
+    }
+    
+    private void logBatchStarted() {
+        String msg = String.format(
+            "Batch %s started (completed %s changes so far)",
+            this.state.batchCounter,
+            this.state.documentCounter
+        );
+        logger.info(msg);
+    }
+    
+    private void logBatchChanges(ChangesResultWrapper changeFeeds) {
+        String msg = String.format(
+            "Batch %s contains %s changes",
+            this.state.batchCounter,
+            changeFeeds.size()
+        );
+        logger.info(msg);
+    }
+    
+    private void updateCheckpoint(Object lastKnownCheckpoint, ChangesResultWrapper changeFeeds) {
+        if (!this.state.cancel && (lastKnownCheckpoint == null || !lastKnownCheckpoint.equals(changeFeeds.getLastSeq()))) {
+            try {
+                this.targetDb.putCheckpoint(this.getReplicationId(), changeFeeds.getLastSeq());
+            } catch (DocumentStoreException e) {
+                logger.log(Level.WARNING, "Failed to put checkpoint doc, next replication will start from previous checkpoint", e);
+            }
+        }
+    }
+    
+    private void logBatchCompleted(int batchChangesProcessed) {
+        long batchEndTime = System.currentTimeMillis();
+        String msg = String.format(
+            "Batch %s completed in %sms (batch was %s changes)",
+            this.state.batchCounter,
+            batchEndTime - System.currentTimeMillis(),
+            batchChangesProcessed
+        );
+        logger.info(msg);
+    }
+    
+    private void logReplicationComplete(long startTime) {
         long endTime = System.currentTimeMillis();
         long deltaTime = endTime - startTime;
         String msg;
         if (this.state.cancel) {
             msg = String.format(Locale.ENGLISH,
-                    "Pull canceled after %sms (%s changes processed)",
-                    deltaTime,
-                    this.state.documentCounter);
+                "Pull canceled after %sms (%s changes processed)",
+                deltaTime,
+                this.state.documentCounter);
         } else {
             msg = String.format(Locale.ENGLISH,
-                    "Pull completed in %sms (%s total changes processed)",
-                    deltaTime,
-                    this.state.documentCounter
+                "Pull completed in %sms (%s total changes processed)",
+                deltaTime,
+                this.state.documentCounter
             );
         }
         logger.info(msg);
-
     }
 
     public static class BatchItem {
